@@ -1,0 +1,23 @@
+[package]
+name = "hotkey-listener"
+version = "0.1.0"
+edition = "2021"
+authors = ["Martin Trojer <martin.trojer@gmail.com>"]
+description = "Cross-platform global hotkey listener with native Wayland support"
+license = "MIT"
+repository = "https://github.com/mtrojer/hotkey-listener"
+keywords = ["hotkey", "keyboard", "wayland", "evdev", "global"]
+categories = ["os", "hardware-support"]
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
+nix = { version = "0.29", features = ["fs"] }
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rdev = "0.5"
