@@ -84,6 +84,13 @@ impl HotkeyListener {
 /// The background listener thread automatically stops when this handle is dropped,
 /// providing automatic cleanup without requiring manual shutdown signals.
 ///
+/// # Platform Notes
+///
+/// On Linux, the listener thread exits immediately when the handle is dropped.
+/// On macOS, `rdev::listen()` receives all keyboard events system-wide and filters
+/// for registered hotkeys. The thread cannot be stopped early but terminates with
+/// the process.
+///
 /// # Example
 ///
 /// ```no_run

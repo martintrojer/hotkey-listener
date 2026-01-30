@@ -71,6 +71,14 @@ On Linux, the user must have permission to read from `/dev/input/event*` devices
 - Running as root, or
 - Being a member of the `input` group: `sudo usermod -aG input $USER`
 
+## Platform Notes
+
+### Linux
+The listener thread polls `/dev/input` devices and responds immediately when the handle is dropped.
+
+### macOS
+The listener uses `rdev::listen()` which receives **all** keyboard events system-wide (not just registered hotkeys) and filters them. Due to limitations in `rdev`, the listener thread cannot be interrupted once started - it will only terminate when the process exits. This is generally fine since handle cleanup typically occurs at program shutdown.
+
 ## License
 
 MIT License
