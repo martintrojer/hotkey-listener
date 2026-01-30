@@ -8,6 +8,7 @@ Cross-platform global hotkey listener with native Wayland support.
 - **Automatic keyboard reconnection** - Handles USB keyboard disconnect/reconnect gracefully
 - **Modifier key support** - Parse and detect `Shift+F8` style hotkey combinations
 - **Simple push-to-talk API** - Clean pressed/released event model
+- **Automatic cleanup** - Background thread stops when handle is dropped
 - **Cross-platform** - Linux (evdev) + macOS (rdev) with unified API
 
 ## Why This Crate?
@@ -26,32 +27,34 @@ Most existing global hotkey crates for Rust rely on X11 APIs on Linux, which don
 ## Usage
 
 ```rust
-use hotkey_listener::{parse_hotkey, HotkeyListenerBuilder};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use hotkey_listener::{parse_hotkey, HotkeyListenerBuilder, HotkeyEvent};
+use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
     let hotkey = parse_hotkey("Shift+F8")?;
 
-    let running = Arc::new(AtomicBool::new(true));
-    let listener = HotkeyListenerBuilder::new()
+    // Build and start the listener
+    let handle = HotkeyListenerBuilder::new()
         .add_hotkey(hotkey)
-        .build()?;
+        .build()?
+        .start()?;
 
-    let rx = listener.start(running.clone());
-
-    while let Ok(event) = rx.recv() {
-        match event {
-            hotkey_listener::HotkeyEvent::Pressed(idx) => {
+    // Receive hotkey events
+    loop {
+        match handle.recv_timeout(Duration::from_millis(100)) {
+            Ok(HotkeyEvent::Pressed(idx)) => {
                 println!("Hotkey {} pressed", idx);
             }
-            hotkey_listener::HotkeyEvent::Released(idx) => {
+            Ok(HotkeyEvent::Released(idx)) => {
                 println!("Hotkey {} released", idx);
+            }
+            Err(_) => {
+                // Timeout - check for exit conditions, do other work, etc.
             }
         }
     }
 
-    Ok(())
+    // Background thread stops automatically when `handle` is dropped
 }
 ```
 

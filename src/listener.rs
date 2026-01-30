@@ -3,9 +3,10 @@
 use crate::event::HotkeyEvent;
 use crate::hotkey::Hotkey;
 use anyhow::Result;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Builder for creating a hotkey listener.
 #[derive(Default)]
@@ -61,17 +62,85 @@ pub struct HotkeyListener {
 
 impl HotkeyListener {
     /// Start listening for hotkeys in a background thread.
-    /// Returns a receiver for hotkey events.
     ///
-    /// The listener will continue running until the `running` flag is set to false.
+    /// Returns a [`HotkeyListenerHandle`] that receives hotkey events.
+    /// The background thread automatically stops when the handle is dropped.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn start(self, running: Arc<AtomicBool>) -> Result<Receiver<HotkeyEvent>> {
-        self.inner.start(running)
+    pub fn start(self) -> Result<HotkeyListenerHandle> {
+        let running = Arc::new(AtomicBool::new(true));
+        let rx = self.inner.start(Arc::clone(&running))?;
+        Ok(HotkeyListenerHandle { running, rx })
     }
 
     /// Start listening (unsupported platform stub).
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub fn start(self, _running: Arc<AtomicBool>) -> Result<Receiver<HotkeyEvent>> {
+    pub fn start(self) -> Result<HotkeyListenerHandle> {
         anyhow::bail!("Hotkey listening is not supported on this platform")
+    }
+}
+
+/// Handle for receiving hotkey events.
+///
+/// The background listener thread automatically stops when this handle is dropped,
+/// providing automatic cleanup without requiring manual shutdown signals.
+///
+/// # Example
+///
+/// ```no_run
+/// use hotkey_listener::{parse_hotkey, HotkeyListenerBuilder};
+/// use std::time::Duration;
+///
+/// let hotkey = parse_hotkey("F8").unwrap();
+/// let handle = HotkeyListenerBuilder::new()
+///     .add_hotkey(hotkey)
+///     .build()
+///     .unwrap()
+///     .start()
+///     .unwrap();
+///
+/// // Receive events
+/// while let Ok(event) = handle.recv_timeout(Duration::from_millis(100)) {
+///     println!("Event: {:?}", event);
+/// }
+///
+/// // Thread stops automatically when handle goes out of scope
+/// ```
+pub struct HotkeyListenerHandle {
+    running: Arc<AtomicBool>,
+    rx: Receiver<HotkeyEvent>,
+}
+
+impl HotkeyListenerHandle {
+    /// Block until the next hotkey event.
+    pub fn recv(&self) -> Result<HotkeyEvent, RecvError> {
+        self.rx.recv()
+    }
+
+    /// Wait for the next hotkey event with a timeout.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<HotkeyEvent, RecvTimeoutError> {
+        self.rx.recv_timeout(timeout)
+    }
+
+    /// Try to receive a hotkey event without blocking.
+    pub fn try_recv(&self) -> Result<HotkeyEvent, std::sync::mpsc::TryRecvError> {
+        self.rx.try_recv()
+    }
+
+    /// Check if the listener is still running.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// Manually stop the listener.
+    ///
+    /// This is called automatically when the handle is dropped.
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for HotkeyListenerHandle {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
     }
 }

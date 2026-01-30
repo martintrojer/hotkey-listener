@@ -10,30 +10,34 @@
 //! - **Automatic keyboard reconnection** - Handles USB keyboard disconnect/reconnect
 //! - **Modifier key support** - Parse and detect `Shift+F8` style hotkey combinations
 //! - **Simple push-to-talk API** - Clean pressed/released event model
+//! - **Automatic cleanup** - Background thread stops when handle is dropped
 //! - **Cross-platform** - Linux (evdev) + macOS (rdev) with unified API
 //!
 //! # Example
 //!
 //! ```no_run
-//! use hotkey_listener::{parse_hotkey, HotkeyListenerBuilder};
-//! use std::sync::Arc;
-//! use std::sync::atomic::AtomicBool;
+//! use hotkey_listener::{parse_hotkey, HotkeyListenerBuilder, HotkeyEvent};
+//! use std::time::Duration;
 //!
 //! fn main() -> anyhow::Result<()> {
 //!     let hotkey = parse_hotkey("Shift+F8")?;
 //!
-//!     let running = Arc::new(AtomicBool::new(true));
-//!     let listener = HotkeyListenerBuilder::new()
+//!     // Build and start the listener - no manual shutdown flag needed
+//!     let handle = HotkeyListenerBuilder::new()
 //!         .add_hotkey(hotkey)
-//!         .build()?;
+//!         .build()?
+//!         .start()?;
 //!
-//!     let rx = listener.start(running.clone())?;
-//!
-//!     while let Ok(event) = rx.recv() {
-//!         println!("Event: {:?}", event);
+//!     // Receive hotkey events
+//!     loop {
+//!         match handle.recv_timeout(Duration::from_millis(100)) {
+//!             Ok(HotkeyEvent::Pressed(idx)) => println!("Hotkey {} pressed", idx),
+//!             Ok(HotkeyEvent::Released(idx)) => println!("Hotkey {} released", idx),
+//!             Err(_) => { /* timeout, check exit conditions */ }
+//!         }
 //!     }
 //!
-//!     Ok(())
+//!     // Background thread stops automatically when `handle` is dropped
 //! }
 //! ```
 //!
@@ -56,7 +60,7 @@ mod macos;
 pub use event::HotkeyEvent;
 pub use hotkey::{parse_hotkey, Hotkey, Modifiers};
 pub use key::Key;
-pub use listener::{HotkeyListener, HotkeyListenerBuilder};
+pub use listener::{HotkeyListener, HotkeyListenerBuilder, HotkeyListenerHandle};
 
 #[cfg(target_os = "linux")]
 pub use linux::find_keyboards;
