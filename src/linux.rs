@@ -84,6 +84,36 @@ fn set_nonblocking(keyboards: &[Device]) -> Result<()> {
     Ok(())
 }
 
+/// Drain any stale events from keyboards and verify they're readable.
+/// This is especially important for Bluetooth keyboards after reconnection.
+fn drain_events(keyboards: &mut [Device]) {
+    for device in keyboards.iter_mut() {
+        let device_name = device.name().map(String::from);
+        loop {
+            match device.fetch_events() {
+                Ok(events) => {
+                    let count = events.count();
+                    if count == 0 {
+                        break;
+                    }
+                    log::debug!("Drained {} stale events from {:?}", count, device_name);
+                }
+                Err(e) => {
+                    // EAGAIN/EWOULDBLOCK means no more events - this is expected
+                    if e.raw_os_error() == Some(libc::EAGAIN)
+                        || e.raw_os_error() == Some(libc::EWOULDBLOCK)
+                    {
+                        break;
+                    }
+                    // Other errors indicate a real problem, but we'll handle it in main loop
+                    log::debug!("Error draining events from {:?}: {}", device_name, e);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Linux hotkey listener using evdev.
 pub struct HotkeyListener {
     keyboards: Vec<Device>,
@@ -124,23 +154,42 @@ fn start_keyboard_listener(
         let mut last_rescan = Instant::now();
         let mut had_error = false;
 
-        // Minimum interval between keyboard rescans
-        const RESCAN_INTERVAL: Duration = Duration::from_secs(10);
+        // Minimum interval between keyboard rescans (shorter for better UX with BT keyboards)
+        const RESCAN_INTERVAL: Duration = Duration::from_secs(3);
 
         while running.load(Ordering::Relaxed) {
             // Check if we need to rescan keyboards (after error and interval passed)
             if had_error && last_rescan.elapsed() >= RESCAN_INTERVAL {
                 log::info!("Keyboard error detected, rescanning devices...");
                 match find_keyboards() {
-                    Ok(new_keyboards) => {
-                        log::info!(
-                            "Keyboards reconnected: found {} device(s)",
-                            new_keyboards.len()
-                        );
-                        if set_nonblocking(&new_keyboards).is_ok() {
-                            keyboards = new_keyboards;
-                            current_mods = Modifiers::default();
-                            had_error = false;
+                    Ok(mut new_keyboards) => {
+                        // Give devices time to fully initialize (especially important for BT keyboards)
+                        thread::sleep(Duration::from_millis(100));
+
+                        match set_nonblocking(&new_keyboards) {
+                            Ok(()) => {
+                                log::info!(
+                                    "Keyboards reconnected: found {} device(s)",
+                                    new_keyboards.len()
+                                );
+                                for kb in &new_keyboards {
+                                    log::debug!(
+                                        "  - {:?} ({})",
+                                        kb.name().unwrap_or("unknown"),
+                                        kb.physical_path().unwrap_or("no path")
+                                    );
+                                }
+                                // Drain any stale events before starting to use the keyboards
+                                drain_events(&mut new_keyboards);
+                                // Drop old keyboards explicitly before replacing
+                                keyboards.clear();
+                                keyboards = new_keyboards;
+                                current_mods = Modifiers::default();
+                                had_error = false;
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to set non-blocking on new keyboards: {}", e);
+                            }
                         }
                     }
                     Err(e) => {
