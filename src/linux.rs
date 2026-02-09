@@ -6,7 +6,9 @@ use crate::key::Key;
 use anyhow::{anyhow, Context, Result};
 use evdev::Device;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use std::collections::HashSet;
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -114,6 +116,68 @@ fn drain_events(keyboards: &mut [Device]) {
     }
 }
 
+/// Get the set of device paths for currently detectable keyboards in /dev/input.
+fn get_keyboard_paths() -> HashSet<PathBuf> {
+    let mut paths = HashSet::new();
+    let Ok(entries) = std::fs::read_dir("/dev/input") else {
+        return paths;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("event"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if let Ok(device) = Device::open(&path) {
+            if device
+                .supported_keys()
+                .map(|keys| keys.contains(evdev::Key::KEY_A))
+                .unwrap_or(false)
+            {
+                paths.insert(path);
+            }
+        }
+    }
+    paths
+}
+
+/// Find keyboard devices at paths not in the known set.
+fn find_new_keyboards(known_paths: &HashSet<PathBuf>) -> Vec<(PathBuf, Device)> {
+    let mut new_keyboards = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/dev/input") else {
+        return new_keyboards;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("event"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if known_paths.contains(&path) {
+            continue;
+        }
+        if let Ok(device) = Device::open(&path) {
+            if device
+                .supported_keys()
+                .map(|keys| keys.contains(evdev::Key::KEY_A))
+                .unwrap_or(false)
+            {
+                log::debug!("Found new keyboard: {:?} at {:?}", device.name(), path);
+                new_keyboards.push((path, device));
+            }
+        }
+    }
+    new_keyboards
+}
+
 /// Linux hotkey listener using evdev.
 pub struct HotkeyListener {
     keyboards: Vec<Device>,
@@ -154,6 +218,13 @@ fn start_keyboard_listener(
         let mut last_rescan = Instant::now();
         let mut had_error = false;
 
+        // Track known keyboard device paths to detect newly connected devices
+        let mut known_paths: HashSet<PathBuf> = get_keyboard_paths();
+
+        // Timer for periodic new device detection (e.g., Bluetooth keyboards connecting)
+        let mut last_device_scan = Instant::now();
+        const DEVICE_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+
         // Minimum interval between keyboard rescans (shorter for better UX with BT keyboards)
         const RESCAN_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -186,6 +257,9 @@ fn start_keyboard_listener(
                                 keyboards = new_keyboards;
                                 current_mods = Modifiers::default();
                                 had_error = false;
+                                // Rebuild known paths and reset device scan timer
+                                known_paths = get_keyboard_paths();
+                                last_device_scan = Instant::now();
                             }
                             Err(e) => {
                                 log::warn!("Failed to set non-blocking on new keyboards: {}", e);
@@ -197,6 +271,43 @@ fn start_keyboard_listener(
                     }
                 }
                 last_rescan = Instant::now();
+            }
+
+            // Periodically check for newly connected keyboards (e.g., Bluetooth)
+            if last_device_scan.elapsed() >= DEVICE_SCAN_INTERVAL {
+                let new_devices = find_new_keyboards(&known_paths);
+                if !new_devices.is_empty() {
+                    log::info!("New keyboard(s) detected: {} device(s)", new_devices.len());
+
+                    // Give devices time to fully initialize
+                    thread::sleep(Duration::from_millis(100));
+
+                    let mut paths = Vec::new();
+                    let mut devices = Vec::new();
+                    for (path, device) in new_devices {
+                        log::info!(
+                            "  - {:?} ({})",
+                            device.name().unwrap_or("unknown"),
+                            device.physical_path().unwrap_or("no path")
+                        );
+                        paths.push(path);
+                        devices.push(device);
+                    }
+
+                    match set_nonblocking(&devices) {
+                        Ok(()) => {
+                            drain_events(&mut devices);
+                            for path in paths {
+                                known_paths.insert(path);
+                            }
+                            keyboards.extend(devices);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to set non-blocking on new keyboards: {}", e);
+                        }
+                    }
+                }
+                last_device_scan = Instant::now();
             }
 
             let mut any_error = false;
